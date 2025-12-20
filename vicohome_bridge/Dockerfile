@@ -1,6 +1,7 @@
 # syntax=docker/dockerfile:1
 
 ARG BUILD_ARCH
+ARG BUILD_FROM
 # Builder stage: compile vico-cli for Linux
 FROM golang:1.23-alpine AS builder
 
