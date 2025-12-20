@@ -1,5 +1,6 @@
 # syntax=docker/dockerfile:1
 
+ARG BUILD_ARCH
 # Builder stage: compile vico-cli for Linux
 FROM golang:1.23-alpine AS builder
 
@@ -13,7 +14,8 @@ RUN go mod download
 COPY vico-cli-main/ ./
 
 # Build the vico-cli binary
-RUN CGO_ENABLED=0 GOOS=linux go build -o /out/vico-cli main.go
+
+RUN CGO_ENABLED=0 GOOS=linux GOARCH=$(echo ${BUILD_ARCH} | sed 's/armv7/arm/g' | sed 's/aarch64/arm64/g') go build -o /out/vico-cli main.go
 
 # ---------------------------------------------------------------------
 # Runtime image: Home Assistant base image for the current architecture
