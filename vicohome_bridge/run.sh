@@ -15,6 +15,8 @@ BASE_TOPIC=$(bashio::config 'base_topic')
 BOOTSTRAP_HISTORY=$(bashio::config 'bootstrap_history')
 REGION=$(bashio::config 'region')
 API_BASE_OVERRIDE=$(bashio::config 'api_base_override')
+ROBOFLOW_API_KEY=$(bashio::config 'roboflow_api_key')
+ROBOFLOW_MODEL_ID=$(bashio::config 'roboflow_model_id')
 
 [ -z "${BOOTSTRAP_HISTORY}" ] && BOOTSTRAP_HISTORY="false"
 HAS_BOOTSTRAPPED="false"
@@ -144,6 +146,7 @@ ensure_discovery_published() {
   local battery_config_topic="homeassistant/sensor/${device_ident}_battery/config"
   local wifi_config_topic="homeassistant/sensor/${device_ident}_wifi/config"
   local online_config_topic="homeassistant/binary_sensor/${device_ident}_online/config"
+  local bird_config_topic="homeassistant/sensor/${device_ident}_bird_id/config"
 
   if [ -z "${camera_name}" ] || [ "${camera_name}" = "null" ]; then
     camera_name="Camera ${camera_id}"
@@ -181,6 +184,13 @@ EOF
 EOF
 )
 
+  local bird_payload
+  bird_payload=$(cat <<EOF
+{"name":"Vicohome ${camera_name} Bird ID","unique_id":"${device_ident}_bird_id","state_topic":"${BASE_TOPIC}/${safe_id}/bird_id","availability_topic":"${AVAILABILITY_TOPIC}","payload_available":"online","payload_not_available":"offline","icon":"mdi:bird","device":{"identifiers":["${device_ident}"],"name":"Vicohome ${camera_name}","manufacturer":"Vicohome","model":"Camera"}}
+EOF
+)
+
+
   mosquitto_pub ${MQTT_ARGS} -t "${sensor_topic}" -m "${sensor_payload}" -q 0 || \
     bashio::log.warning "Failed to publish MQTT discovery config for sensor ${device_ident}_last_event"
 
@@ -196,9 +206,75 @@ EOF
   mosquitto_pub ${MQTT_ARGS} -t "${online_config_topic}" -m "${online_payload}" -q 0 || \
     bashio::log.warning "Failed to publish MQTT discovery config for binary_sensor ${device_ident}_online"
 
+  mosquitto_pub ${MQTT_ARGS} -t "${bird_config_topic}" -m "${bird_payload}" -q 0 || \
+    bashio::log.warning "Failed to publish Bird ID discovery"
+
   if ! touch "${marker}"; then
     bashio::log.warning "Failed to update discovery marker ${marker}; discovery refresh scheduling may misbehave."
   fi
+}
+
+analyze_bird_video() {
+  local camera_safe_id="$1"
+  local video_url="$2"
+
+  bashio::log.info "Starting AI Bird Analysis for ${camera_safe_id}..."
+
+  local tmp_dir="/tmp/bird_${camera_safe_id}"
+  mkdir -p "$tmp_dir"
+  local video_file="${tmp_dir}/vid.mp4"
+
+  # Download the clip
+  curl -s -L -o "$video_file" "$video_url"
+
+  local best_class="No Bird Detected"
+  local best_conf=0
+
+  # Best of 3 frames: Extracting frames at 2s, 5s, and 8s
+  for ts in 2 5 8; do
+    local frame="${tmp_dir}/f_${ts}.jpg"
+    ffmpeg -y -ss "$ts" -i "$video_file" -frames:v 1 -q:v 2 "$frame" >/dev/null 2>&1
+
+    if [ -f "$frame" ]; then
+      # Convert image to Base64 (single line)
+      local b64_image
+      b64_image=$(base64 -w 0 "$frame")
+
+      # POST to Roboflow
+      local response
+      response=$(curl -s -X POST "https://serverless.roboflow.com/${ROBOFLOW_MODEL_ID}?api_key=${ROBOFLOW_API_KEY}" \
+        -H "Content-Type: application/x-www-form-urlencoded" \
+        -d "$b64_image")
+
+      # Extract highest confidence from this frame using jq
+      local top_pred
+      top_pred=$(echo "$response" | jq -r '.predictions | sort_by(.confidence) | last // empty')
+
+      if [ -n "$top_pred" ]; then
+        local conf
+        conf=$(echo "$top_pred" | jq -r '.confidence')
+        local class
+        class=$(echo "$top_pred" | jq -r '.class')
+
+        # Compare confidence (bash doesn't do floats, so we use jq)
+        if [[ $(jq -rn --arg c "$conf" --arg bc "$best_conf" '($c|tonumber) > ($bc|tonumber)') == "true" ]]; then
+          best_conf=$conf
+          best_class=$class
+        fi
+      fi
+    fi
+  done
+
+  # Publish result
+  local conf_pct
+  conf_pct=$(echo "$best_conf * 100 / 1" | jq '. | round')
+  local final_msg="${best_class} (${conf_pct}%)"
+
+  mosquitto_pub ${MQTT_ARGS} -t "${BASE_TOPIC}/${camera_safe_id}/bird_id" -m "${final_msg}" -r
+
+  # Cleanup
+  rm -rf "$tmp_dir"
+  bashio::log.info "AI Analysis Complete: ${final_msg}"
 }
 
 publish_event_for_camera() {
@@ -277,6 +353,16 @@ run_bootstrap_history() {
       EVENT_TYPE=$(echo "${event}" | jq -r '(.eventType // .type // .event_type // "motion") | if . == "" then "motion" else . end')
 
       ensure_discovery_published "${CAMERA_ID}" "${CAMERA_NAME}"
+
+      # --- ROBOWFLOW AI LOGIC ---
+      if [ -n "${ROBOFLOW_API_KEY}" ]; then
+        VIDEO_URL=$(echo "${event}" | jq -r '.videoUrl // empty')
+        if [ -n "${VIDEO_URL}" ] && [ "${VIDEO_URL}" != "null" ]; then
+          analyze_bird_video "${SAFE_ID}" "${VIDEO_URL}" &
+        fi
+      fi
+      # -------------------------
+
       if publish_event_for_camera "${SAFE_ID}" "${event}"; then
         if [ "${EVENT_TYPE}" = "motion" ] || [ "${EVENT_TYPE}" = "person" ] || [ "${EVENT_TYPE}" = "human" ] || [ "${EVENT_TYPE}" = "bird" ]; then
           publish_motion_pulse "${SAFE_ID}"
@@ -496,6 +582,16 @@ while true; do
       bashio::log.debug "Event for ${SAFE_ID} (${CAMERA_NAME}) type='${EVENT_TYPE}': ${event_preview}"
 
       ensure_discovery_published "${CAMERA_ID}" "${CAMERA_NAME}"
+
+      # --- ROBOWFLOW AI LOGIC ---
+      if [ -n "${ROBOFLOW_API_KEY}" ]; then
+        VIDEO_URL=$(echo "${event}" | jq -r '.videoUrl // empty')
+        if [ -n "${VIDEO_URL}" ] && [ "${VIDEO_URL}" != "null" ]; then
+          analyze_bird_video "${SAFE_ID}" "${VIDEO_URL}" &
+        fi
+      fi
+      # -------------------------
+
       if publish_event_for_camera "${SAFE_ID}" "${event}"; then
         if [ "${EVENT_TYPE}" = "motion" ] || [ "${EVENT_TYPE}" = "person" ] || [ "${EVENT_TYPE}" = "human" ] || [ "${EVENT_TYPE}" = "bird" ]; then
           bashio::log.debug "Triggering motion pulse for ${SAFE_ID} because event type '${EVENT_TYPE}' requires it."
@@ -526,6 +622,17 @@ while true; do
     bashio::log.debug "Event for ${SAFE_ID} (${CAMERA_NAME}) type='${EVENT_TYPE}': ${event_preview}"
 
     ensure_discovery_published "${CAMERA_ID}" "${CAMERA_NAME}"
+
+    # --- ROBOWFLOW AI LOGIC ---
+    if [ -n "${ROBOFLOW_API_KEY}" ]; then
+      VIDEO_URL=$(echo "${event}" | jq -r '.videoUrl // empty')
+      if [ -n "${VIDEO_URL}" ] && [ "${VIDEO_URL}" != "null" ]; then
+        # Run in background (&) so the bridge doesn't stop polling
+        analyze_bird_video "${SAFE_ID}" "${VIDEO_URL}" &
+      fi
+    fi
+    # -------------------------
+
     if publish_event_for_camera "${SAFE_ID}" "${event}"; then
       if [ "${EVENT_TYPE}" = "motion" ] || [ "${EVENT_TYPE}" = "person" ] || [ "${EVENT_TYPE}" = "human" ] || [ "${EVENT_TYPE}" = "bird" ]; then
         bashio::log.debug "Triggering motion pulse for ${SAFE_ID} because event type '${EVENT_TYPE}' requires it."

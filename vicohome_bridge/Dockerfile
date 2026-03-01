@@ -20,8 +20,8 @@ RUN CGO_ENABLED=0 GOOS=linux go build -o /out/vico-cli main.go
 # -------------------------------------------------------------------
 FROM ghcr.io/home-assistant/aarch64-base:3.19
 
-# Install MQTT client and jq for JSON handling
-RUN apk add --no-cache mosquitto-clients jq
+# Install MQTT client and jq for JSON handling, ffmpeg for video=>image extraction, curl for roboflow API calls
+RUN apk add --no-cache mosquitto-clients jq ffmpeg curl
 
 # Run as root for simplicity
 USER root
