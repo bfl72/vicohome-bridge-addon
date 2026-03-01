@@ -186,7 +186,7 @@ EOF
 
   local bird_payload
   bird_payload=$(cat <<EOF
-{"name":"Vicohome ${camera_name} Bird ID","unique_id":"${device_ident}_bird_id","state_topic":"${BASE_TOPIC}/${safe_id}/bird_id","availability_topic":"${AVAILABILITY_TOPIC}","payload_available":"online","payload_not_available":"offline","icon":"mdi:bird","value_template":"{{ value_json.label if value_json.label is defined else value }}","json_attributes_topic":"${BASE_TOPIC}/${safe_id}/bird_id","device":{"identifiers":["${device_ident}"],"name":"Vicohome ${camera_name}","manufacturer":"Vicohome","model":"Camera"}}
+{"name":"Vicohome ${camera_name} Bird ID","unique_id":"${device_ident}_bird_id","state_topic":"${BASE_TOPIC}/${safe_id}/bird_id","availability_topic":"${AVAILABILITY_TOPIC}","payload_available":"online","payload_not_available":"offline","icon":"mdi:bird","device":{"identifiers":["${device_ident}"],"name":"Vicohome ${camera_name}","manufacturer":"Vicohome","model":"Camera"}}
 EOF
 )
 
@@ -240,7 +240,6 @@ analyze_bird_video() {
 
   local best_class="No Bird Detected"
   local best_conf=0
-  local image_count=0
 
   # Best of 3 frames: Extracting frames at 2s, 5s, and 8s
   for ts in 2 5 8; do
@@ -255,7 +254,6 @@ analyze_bird_video() {
       local b64_file="${tmp_dir}/b64_${ts}.txt"
       echo -n "data:image/jpeg;base64," > "$b64_file"
       base64 "$frame" | tr -d '\n' >> "$b64_file"
-      image_count=$((image_count + 1))
 
       # POST to Roboflow Classify API
       bashio::log.debug "Sending frame to Roboflow..."
@@ -292,36 +290,15 @@ analyze_bird_video() {
 
   # Final results
   local final_msg="${best_class}"
-  local conf_pct=0
   if [[ $(jq -rn --arg bc "$best_conf" '($bc|tonumber) > 0') == "true" ]]; then
+    local conf_pct
     conf_pct=$(jq -rn --arg bc "$best_conf" '($bc|tonumber * 100) | round')
     final_msg="${best_class} (${conf_pct}%)"
   fi
 
-  # Build JSON payload using jq to read from files
-  local payload_file="${tmp_dir}/payload.json"
-  
-  # Initialize payload with metadata
-  jq -n \
-    --arg label "$final_msg" \
-    --arg bird "$best_class" \
-    --argjson conf "$conf_pct" \
-    '{label: $label, bird_name: $bird, confidence: $conf, images: []}' > "$payload_file"
-
-  # Add images to the array one by one from files to avoid ARG_MAX
-  for f in "${tmp_dir}"/b64_*.txt; do
-    if [ -f "$f" ]; then
-      local b64_data
-      b64_data=$(cat "$f")
-      # We use a temporary file for the updated JSON to be safe
-      jq --arg img "$b64_data" '.images += [$img]' "$payload_file" > "${payload_file}.tmp" && mv "${payload_file}.tmp" "$payload_file"
-    fi
-  done
-
   bashio::log.info "AI Analysis Complete: ${final_msg}. Publishing to MQTT..."
-  # Use -f to publish from file, avoiding Argument list too long
-  if ! mosquitto_pub ${MQTT_ARGS} -t "${BASE_TOPIC}/${camera_safe_id}/bird_id" -f "$payload_file" -r; then
-    bashio::log.warning "Failed to publish bird_id payload to MQTT"
+  if ! mosquitto_pub ${MQTT_ARGS} -t "${BASE_TOPIC}/${camera_safe_id}/bird_id" -m "${final_msg}" -r; then
+    bashio::log.warning "Failed to publish bird_id to MQTT"
   fi
 
   # Cleanup
