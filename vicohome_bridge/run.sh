@@ -186,7 +186,7 @@ EOF
 
   local bird_payload
   bird_payload=$(cat <<EOF
-{"name":"Vicohome ${camera_name} Bird ID","unique_id":"${device_ident}_bird_id","state_topic":"${BASE_TOPIC}/${safe_id}/bird_id","availability_topic":"${AVAILABILITY_TOPIC}","payload_available":"online","payload_not_available":"offline","icon":"mdi:bird","device":{"identifiers":["${device_ident}"],"name":"Vicohome ${camera_name}","manufacturer":"Vicohome","model":"Camera"}}
+{"name":"Vicohome ${camera_name} Bird ID","unique_id":"${device_ident}_bird_id","state_topic":"${BASE_TOPIC}/${safe_id}/bird_id","availability_topic":"${AVAILABILITY_TOPIC}","payload_available":"online","payload_not_available":"offline","icon":"mdi:bird","value_template":"{{ value_json.label if value_json.label is defined else value }}","json_attributes_topic":"${BASE_TOPIC}/${safe_id}/bird_id","device":{"identifiers":["${device_ident}"],"name":"Vicohome ${camera_name}","manufacturer":"Vicohome","model":"Camera"}}
 EOF
 )
 
@@ -240,18 +240,24 @@ analyze_bird_video() {
 
   local best_class="No Bird Detected"
   local best_conf=0
+  local captured_images=""
 
   # Best of 3 frames: Extracting frames at 2s, 5s, and 8s
   for ts in 2 5 8; do
     local frame="${tmp_dir}/f_${ts}.jpg"
     bashio::log.debug "Extracting frame at ${ts}s..."
+    # Extract full-resolution frame
     ffmpeg -y -ss "$ts" -i "$video_file" -frames:v 1 -q:v 2 "$frame" >/tmp/ffmpeg_log 2>&1
 
     if [ -f "$frame" ] && [ -s "$frame" ]; then
       bashio::log.debug "Frame extracted: ${frame} ($(stat -c%s "$frame") bytes)"
+      
       # Convert image to Base64 (single line) with data URI prefix
       local b64_image
       b64_image="data:image/jpeg;base64,$(base64 "$frame" | tr -d '\n')"
+      
+      # Add to captured images for MQTT payload
+      captured_images="${captured_images}\"${b64_image}\","
 
       # POST to Roboflow Classify API
       bashio::log.debug "Sending frame to Roboflow..."
@@ -274,7 +280,7 @@ analyze_bird_video() {
         bashio::log.info "Found prediction: ${class} with confidence ${conf}"
 
         # Compare confidence (bash doesn't do floats, so we use jq)
-        if [[ $(jq -rn --arg c "$conf" --arg bc "$best_conf" '($c|tonumber) > ($bc|tonumber)') == "true" ]]; then
+        if [[ $(jq -rn "$conf > $best_conf") == "true" ]]; then
           best_conf=$conf
           best_class=$class
         fi
@@ -288,14 +294,28 @@ analyze_bird_video() {
 
   # Publish result
   local final_msg="${best_class}"
+  local conf_pct=0
   if [[ $(jq -rn "$best_conf > 0") == "true" ]]; then
-    local conf_pct
     conf_pct=$(jq -rn "($best_conf * 100) | round")
     final_msg="${best_class} (${conf_pct}%)"
   fi
 
+  # Construct JSON payload
+  local images_json="[]"
+  if [ -n "${captured_images}" ]; then
+    images_json="[${captured_images%,}]"
+  fi
+
+  local json_payload
+  json_payload=$(jq -n \
+    --arg label "$final_msg" \
+    --arg bird "$best_class" \
+    --argjson conf "$conf_pct" \
+    --argjson imgs "$images_json" \
+    '{label: $label, bird_name: $bird, confidence: $conf, images: $imgs}')
+
   bashio::log.info "AI Analysis Complete: ${final_msg}. Publishing to MQTT..."
-  mosquitto_pub ${MQTT_ARGS} -t "${BASE_TOPIC}/${camera_safe_id}/bird_id" -m "${final_msg}" -r || \
+  mosquitto_pub ${MQTT_ARGS} -t "${BASE_TOPIC}/${camera_safe_id}/bird_id" -m "${json_payload}" -r || \
     bashio::log.warning "Failed to publish bird_id to MQTT"
 
   # Cleanup
