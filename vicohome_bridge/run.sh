@@ -236,42 +236,39 @@ analyze_bird_video() {
 
   local file_size
   file_size=$(stat -c%s "$video_file" 2>/dev/null || echo 0)
-  bashio::log.debug "Video saved to ${video_file} (${file_size} bytes)"
+  bashio::log.info "Video saved to ${video_file} (${file_size} bytes)"
 
   local best_class="No Bird Detected"
   local best_conf=0
-  local captured_images=""
+  local image_count=0
 
   # Best of 3 frames: Extracting frames at 2s, 5s, and 8s
   for ts in 2 5 8; do
     local frame="${tmp_dir}/f_${ts}.jpg"
     bashio::log.debug "Extracting frame at ${ts}s..."
-    # Extract full-resolution frame
     ffmpeg -y -ss "$ts" -i "$video_file" -frames:v 1 -q:v 2 "$frame" >/tmp/ffmpeg_log 2>&1
 
     if [ -f "$frame" ] && [ -s "$frame" ]; then
       bashio::log.debug "Frame extracted: ${frame} ($(stat -c%s "$frame") bytes)"
-      
-      # Convert image to Base64 (single line) with data URI prefix
-      local b64_image
-      b64_image="data:image/jpeg;base64,$(base64 "$frame" | tr -d '\n')"
-      
-      # Add to captured images for MQTT payload
-      captured_images="${captured_images}\"${b64_image}\","
+
+      # Convert image to Base64 and save to file to avoid ARG_MAX issues
+      local b64_file="${tmp_dir}/b64_${ts}.txt"
+      echo -n "data:image/jpeg;base64," > "$b64_file"
+      base64 "$frame" | tr -d '\n' >> "$b64_file"
+      image_count=$((image_count + 1))
 
       # POST to Roboflow Classify API
       bashio::log.debug "Sending frame to Roboflow..."
       local response
-      # Use --data-binary @- to read from stdin and avoid "Argument list too long"
-      response=$(echo -n "$b64_image" | curl -s -X POST "https://classify.roboflow.com/${ROBOFLOW_MODEL_ID}?api_key=${ROBOFLOW_API_KEY}" \
+      response=$(curl -s -X POST "https://classify.roboflow.com/${ROBOFLOW_MODEL_ID}?api_key=${ROBOFLOW_API_KEY}" \
         -H "Content-Type: application/x-www-form-urlencoded" \
-        --data-binary @-)
+        --data-binary "@$b64_file")
 
       bashio::log.debug "Roboflow response: ${response}"
 
       # Extract highest confidence from this frame using jq
       local top_pred
-      top_pred=$(echo "$response" | jq -r '.predictions | sort_by(.confidence) | last // empty')
+      top_pred=$(echo "$response" | jq -c '.predictions | sort_by(.confidence) | last // empty')
 
       if [ -n "$top_pred" ] && [ "$top_pred" != "null" ]; then
         local conf
@@ -280,8 +277,8 @@ analyze_bird_video() {
         class=$(echo "$top_pred" | jq -r '.class')
         bashio::log.info "Found prediction: ${class} with confidence ${conf}"
 
-        # Compare confidence (bash doesn't do floats, so we use jq)
-        if [[ $(jq -rn "$conf > $best_conf") == "true" ]]; then
+        # Compare confidence safely with jq
+        if [[ $(jq -rn --arg c "$conf" --arg bc "$best_conf" '($c|tonumber) > ($bc|tonumber)') == "true" ]]; then
           best_conf=$conf
           best_class=$class
         fi
@@ -293,31 +290,39 @@ analyze_bird_video() {
     fi
   done
 
-  # Publish result
+  # Final results
   local final_msg="${best_class}"
   local conf_pct=0
-  if [[ $(jq -rn "$best_conf > 0") == "true" ]]; then
-    conf_pct=$(jq -rn "($best_conf * 100) | round")
+  if [[ $(jq -rn --arg bc "$best_conf" '($bc|tonumber) > 0') == "true" ]]; then
+    conf_pct=$(jq -rn --arg bc "$best_conf" '($bc|tonumber * 100) | round')
     final_msg="${best_class} (${conf_pct}%)"
   fi
 
-  # Construct JSON payload
-  local images_json="[]"
-  if [ -n "${captured_images}" ]; then
-    images_json="[${captured_images%,}]"
-  fi
-
-  local json_payload
-  json_payload=$(jq -n \
+  # Build JSON payload using jq to read from files
+  local payload_file="${tmp_dir}/payload.json"
+  
+  # Initialize payload with metadata
+  jq -n \
     --arg label "$final_msg" \
     --arg bird "$best_class" \
     --argjson conf "$conf_pct" \
-    --argjson imgs "$images_json" \
-    '{label: $label, bird_name: $bird, confidence: $conf, images: $imgs}')
+    '{label: $label, bird_name: $bird, confidence: $conf, images: []}' > "$payload_file"
+
+  # Add images to the array one by one from files to avoid ARG_MAX
+  for f in "${tmp_dir}"/b64_*.txt; do
+    if [ -f "$f" ]; then
+      local b64_data
+      b64_data=$(cat "$f")
+      # We use a temporary file for the updated JSON to be safe
+      jq --arg img "$b64_data" '.images += [$img]' "$payload_file" > "${payload_file}.tmp" && mv "${payload_file}.tmp" "$payload_file"
+    fi
+  done
 
   bashio::log.info "AI Analysis Complete: ${final_msg}. Publishing to MQTT..."
-  mosquitto_pub ${MQTT_ARGS} -t "${BASE_TOPIC}/${camera_safe_id}/bird_id" -m "${json_payload}" -r || \
-    bashio::log.warning "Failed to publish bird_id to MQTT"
+  # Use -f to publish from file, avoiding Argument list too long
+  if ! mosquitto_pub ${MQTT_ARGS} -t "${BASE_TOPIC}/${camera_safe_id}/bird_id" -f "$payload_file" -r; then
+    bashio::log.warning "Failed to publish bird_id payload to MQTT"
+  fi
 
   # Cleanup
   rm -rf "$tmp_dir"
@@ -332,7 +337,7 @@ publish_event_for_camera() {
 
   if [ -n "${trace_id}" ]; then
     if grep -q "${trace_id}" "${SEEN_IDS_FILE}" 2>/dev/null; then
-      bashio::log.debug "Skipping already processed event ${trace_id}"
+      bashio::log.info "Skipping already processed event ${trace_id}"
       return 1
     fi
     echo "${trace_id}" >> "${SEEN_IDS_FILE}"
@@ -597,7 +602,7 @@ while true; do
     continue
   fi
 
-  bashio::log.info "vico-cli output: $(echo "${JSON_OUTPUT}")"
+  bashio::log.debug "vico-cli output: $(echo "${JSON_OUTPUT}")"
 
   # Quick sanity check so we don't feed clearly non-JSON into jq
   first_char=$(printf '%s' "${JSON_OUTPUT}" | sed -n '1s/^\(.\).*$/\1/p')
