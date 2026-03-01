@@ -219,13 +219,20 @@ analyze_bird_video() {
   local video_url="$2"
 
   bashio::log.info "Starting AI Bird Analysis for ${camera_safe_id}..."
+  bashio::log.debug "Video URL: ${video_url}"
 
-  local tmp_dir="/tmp/bird_${camera_safe_id}"
+  local tmp_dir
+  tmp_dir="/tmp/bird_${camera_safe_id}_$(date +%s)"
   mkdir -p "$tmp_dir"
   local video_file="${tmp_dir}/vid.mp4"
 
   # Download the clip
-  curl -s -L -o "$video_file" "$video_url"
+  if ! curl -s -L -o "$video_file" "$video_url"; then
+    bashio::log.error "Failed to download video from ${video_url}"
+    rm -rf "$tmp_dir"
+    return 1
+  fi
+  bashio::log.debug "Video downloaded to ${video_file} ($(stat -c%s "$video_file") bytes)"
 
   local best_class="No Bird Detected"
   local best_conf=0
@@ -233,35 +240,45 @@ analyze_bird_video() {
   # Best of 3 frames: Extracting frames at 2s, 5s, and 8s
   for ts in 2 5 8; do
     local frame="${tmp_dir}/f_${ts}.jpg"
-    ffmpeg -y -ss "$ts" -i "$video_file" -frames:v 1 -q:v 2 "$frame" >/dev/null 2>&1
+    bashio::log.debug "Extracting frame at ${ts}s..."
+    ffmpeg -y -ss "$ts" -i "$video_file" -frames:v 1 -q:v 2 "$frame" >/tmp/ffmpeg_log 2>&1
 
-    if [ -f "$frame" ]; then
+    if [ -f "$frame" ] && [ -s "$frame" ]; then
+      bashio::log.debug "Frame extracted: ${frame} ($(stat -c%s "$frame") bytes)"
       # Convert image to Base64 (single line)
       local b64_image
-      b64_image=$(base64 -w 0 "$frame")
+      b64_image=$(base64 "$frame" | tr -d '\n')
 
       # POST to Roboflow
+      bashio::log.debug "Sending frame to Roboflow..."
       local response
       response=$(curl -s -X POST "https://serverless.roboflow.com/${ROBOFLOW_MODEL_ID}?api_key=${ROBOFLOW_API_KEY}" \
         -H "Content-Type: application/x-www-form-urlencoded" \
         -d "$b64_image")
 
+      bashio::log.debug "Roboflow response: ${response}"
+
       # Extract highest confidence from this frame using jq
       local top_pred
       top_pred=$(echo "$response" | jq -r '.predictions | sort_by(.confidence) | last // empty')
 
-      if [ -n "$top_pred" ]; then
+      if [ -n "$top_pred" ] && [ "$top_pred" != "null" ]; then
         local conf
         conf=$(echo "$top_pred" | jq -r '.confidence')
         local class
         class=$(echo "$top_pred" | jq -r '.class')
+        bashio::log.info "Found prediction: ${class} with confidence ${conf}"
 
         # Compare confidence (bash doesn't do floats, so we use jq)
         if [[ $(jq -rn --arg c "$conf" --arg bc "$best_conf" '($c|tonumber) > ($bc|tonumber)') == "true" ]]; then
           best_conf=$conf
           best_class=$class
         fi
+      else
+        bashio::log.debug "No predictions found in this frame."
       fi
+    else
+      bashio::log.debug "Failed to extract frame at ${ts}s (video might be too short)."
     fi
   done
 
@@ -270,11 +287,12 @@ analyze_bird_video() {
   conf_pct=$(echo "$best_conf * 100 / 1" | jq '. | round')
   local final_msg="${best_class} (${conf_pct}%)"
 
-  mosquitto_pub ${MQTT_ARGS} -t "${BASE_TOPIC}/${camera_safe_id}/bird_id" -m "${final_msg}" -r
+  bashio::log.info "AI Analysis Complete: ${final_msg}. Publishing to MQTT..."
+  mosquitto_pub ${MQTT_ARGS} -t "${BASE_TOPIC}/${camera_safe_id}/bird_id" -m "${final_msg}" -r || \
+    bashio::log.warning "Failed to publish bird_id to MQTT"
 
   # Cleanup
   rm -rf "$tmp_dir"
-  bashio::log.info "AI Analysis Complete: ${final_msg}"
 }
 
 publish_event_for_camera() {
@@ -354,16 +372,16 @@ run_bootstrap_history() {
 
       ensure_discovery_published "${CAMERA_ID}" "${CAMERA_NAME}"
 
-      # --- ROBOWFLOW AI LOGIC ---
-      if [ -n "${ROBOFLOW_API_KEY}" ]; then
-        VIDEO_URL=$(echo "${event}" | jq -r '.videoUrl // empty')
-        if [ -n "${VIDEO_URL}" ] && [ "${VIDEO_URL}" != "null" ]; then
-          analyze_bird_video "${SAFE_ID}" "${VIDEO_URL}" &
-        fi
-      fi
-      # -------------------------
-
       if publish_event_for_camera "${SAFE_ID}" "${event}"; then
+        # --- ROBOWFLOW AI LOGIC ---
+        if [ -n "${ROBOFLOW_API_KEY}" ]; then
+          VIDEO_URL=$(echo "${event}" | jq -r '.videoUrl // empty')
+          if [ -n "${VIDEO_URL}" ] && [ "${VIDEO_URL}" != "null" ]; then
+            analyze_bird_video "${SAFE_ID}" "${VIDEO_URL}" &
+          fi
+        fi
+        # -------------------------
+
         if [ "${EVENT_TYPE}" = "motion" ] || [ "${EVENT_TYPE}" = "person" ] || [ "${EVENT_TYPE}" = "human" ] || [ "${EVENT_TYPE}" = "bird" ]; then
           publish_motion_pulse "${SAFE_ID}"
         fi
@@ -583,16 +601,16 @@ while true; do
 
       ensure_discovery_published "${CAMERA_ID}" "${CAMERA_NAME}"
 
-      # --- ROBOWFLOW AI LOGIC ---
-      if [ -n "${ROBOFLOW_API_KEY}" ]; then
-        VIDEO_URL=$(echo "${event}" | jq -r '.videoUrl // empty')
-        if [ -n "${VIDEO_URL}" ] && [ "${VIDEO_URL}" != "null" ]; then
-          analyze_bird_video "${SAFE_ID}" "${VIDEO_URL}" &
-        fi
-      fi
-      # -------------------------
-
       if publish_event_for_camera "${SAFE_ID}" "${event}"; then
+        # --- ROBOWFLOW AI LOGIC ---
+        if [ -n "${ROBOFLOW_API_KEY}" ]; then
+          VIDEO_URL=$(echo "${event}" | jq -r '.videoUrl // empty')
+          if [ -n "${VIDEO_URL}" ] && [ "${VIDEO_URL}" != "null" ]; then
+            analyze_bird_video "${SAFE_ID}" "${VIDEO_URL}" &
+          fi
+        fi
+        # -------------------------
+
         if [ "${EVENT_TYPE}" = "motion" ] || [ "${EVENT_TYPE}" = "person" ] || [ "${EVENT_TYPE}" = "human" ] || [ "${EVENT_TYPE}" = "bird" ]; then
           bashio::log.debug "Triggering motion pulse for ${SAFE_ID} because event type '${EVENT_TYPE}' requires it."
           publish_motion_pulse "${SAFE_ID}"
@@ -623,17 +641,17 @@ while true; do
 
     ensure_discovery_published "${CAMERA_ID}" "${CAMERA_NAME}"
 
-    # --- ROBOWFLOW AI LOGIC ---
-    if [ -n "${ROBOFLOW_API_KEY}" ]; then
-      VIDEO_URL=$(echo "${event}" | jq -r '.videoUrl // empty')
-      if [ -n "${VIDEO_URL}" ] && [ "${VIDEO_URL}" != "null" ]; then
-        # Run in background (&) so the bridge doesn't stop polling
-        analyze_bird_video "${SAFE_ID}" "${VIDEO_URL}" &
-      fi
-    fi
-    # -------------------------
-
     if publish_event_for_camera "${SAFE_ID}" "${event}"; then
+      # --- ROBOWFLOW AI LOGIC ---
+      if [ -n "${ROBOFLOW_API_KEY}" ]; then
+        VIDEO_URL=$(echo "${event}" | jq -r '.videoUrl // empty')
+        if [ -n "${VIDEO_URL}" ] && [ "${VIDEO_URL}" != "null" ]; then
+          # Run in background (&) so the bridge doesn't stop polling
+          analyze_bird_video "${SAFE_ID}" "${VIDEO_URL}" &
+        fi
+      fi
+      # -------------------------
+
       if [ "${EVENT_TYPE}" = "motion" ] || [ "${EVENT_TYPE}" = "person" ] || [ "${EVENT_TYPE}" = "human" ] || [ "${EVENT_TYPE}" = "bird" ]; then
         bashio::log.debug "Triggering motion pulse for ${SAFE_ID} because event type '${EVENT_TYPE}' requires it."
         publish_motion_pulse "${SAFE_ID}"
