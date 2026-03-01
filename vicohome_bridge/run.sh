@@ -274,7 +274,7 @@ run_bootstrap_history() {
 
       SAFE_ID=$(sanitize_id "${CAMERA_ID}")
       CAMERA_NAME=$(echo "${event}" | jq -r '.deviceName // .camera_name // .camera.name // .cameraName // .title // empty')
-      EVENT_TYPE=$(echo "${event}" | jq -r '.eventType // .type // .event_type // empty')
+      EVENT_TYPE=$(echo "${event}" | jq -r '.eventType // .type // .event_type // "motion"')
 
       ensure_discovery_published "${CAMERA_ID}" "${CAMERA_NAME}"
       if publish_event_for_camera "${SAFE_ID}" "${event}"; then
@@ -488,7 +488,7 @@ while true; do
       if [ -z "${CAMERA_NAME}" ] || [ "${CAMERA_NAME}" = "null" ]; then
         CAMERA_NAME="Camera ${CAMERA_ID}"
       fi
-      EVENT_TYPE=$(echo "${event}" | jq -r '.eventType // .type // .event_type // empty')
+      EVENT_TYPE=$(echo "${event}" | jq -r '.eventType // .type // .event_type // "motion"')
 
       SAFE_ID=$(sanitize_id "${CAMERA_ID}")
 
@@ -518,7 +518,7 @@ while true; do
     if [ -z "${CAMERA_NAME}" ] || [ "${CAMERA_NAME}" = "null" ]; then
       CAMERA_NAME="Camera ${CAMERA_ID}"
     fi
-    EVENT_TYPE=$(echo "${event}" | jq -r '.eventType // .type // .event_type // empty')
+    EVENT_TYPE=$(echo "${event}" | jq -r '.eventType // .type // .event_type // "motion"')
 
     SAFE_ID=$(sanitize_id "${CAMERA_ID}")
 
