@@ -90,6 +90,8 @@ if [ -n "${API_BASE_OVERRIDE}" ]; then
 fi
 
 mkdir -p /data
+SEEN_IDS_FILE="/data/seen_event_ids"
+touch "${SEEN_IDS_FILE}"
 
 # ==========================
 #  Helper functions
@@ -203,6 +205,19 @@ publish_event_for_camera() {
   local camera_safe_id="$1"
   local event_json="$2"
 
+  local trace_id
+  trace_id=$(echo "${event_json}" | jq -r '.traceId // empty')
+  
+  if [ -n "${trace_id}" ]; then
+    if grep -q "${trace_id}" "${SEEN_IDS_FILE}" 2>/dev/null; then
+      bashio::log.debug "Skipping already processed event ${trace_id}"
+      return 1
+    fi
+    echo "${trace_id}" >> "${SEEN_IDS_FILE}"
+    # Keep the seen IDs file from growing indefinitely (last 1000 IDs)
+    tail -n 1000 "${SEEN_IDS_FILE}" > "${SEEN_IDS_FILE}.tmp" && mv "${SEEN_IDS_FILE}.tmp" "${SEEN_IDS_FILE}"
+  fi
+
   mosquitto_pub ${MQTT_ARGS} \
     -t "${BASE_TOPIC}/${camera_safe_id}/events" \
     -m "${event_json}" \
@@ -212,6 +227,8 @@ publish_event_for_camera() {
     -t "${BASE_TOPIC}/${camera_safe_id}/state" \
     -m "${event_json}" \
     -q 0 || bashio::log.warning "Failed to publish MQTT message for ${BASE_TOPIC}/${camera_safe_id}/state"
+  
+  return 0
 }
 
 publish_motion_pulse() {
@@ -260,10 +277,10 @@ run_bootstrap_history() {
       EVENT_TYPE=$(echo "${event}" | jq -r '.eventType // .type // .event_type // empty')
 
       ensure_discovery_published "${CAMERA_ID}" "${CAMERA_NAME}"
-      publish_event_for_camera "${SAFE_ID}" "${event}"
-
-      if [ "${EVENT_TYPE}" = "motion" ] || [ "${EVENT_TYPE}" = "person" ] || [ "${EVENT_TYPE}" = "human" ] || [ "${EVENT_TYPE}" = "bird" ]; then
-        publish_motion_pulse "${SAFE_ID}"
+      if publish_event_for_camera "${SAFE_ID}" "${event}"; then
+        if [ "${EVENT_TYPE}" = "motion" ] || [ "${EVENT_TYPE}" = "person" ] || [ "${EVENT_TYPE}" = "human" ] || [ "${EVENT_TYPE}" = "bird" ]; then
+          publish_motion_pulse "${SAFE_ID}"
+        fi
       fi
     done
   fi
@@ -509,11 +526,11 @@ while true; do
     bashio::log.debug "Event for ${SAFE_ID} (${CAMERA_NAME}) type='${EVENT_TYPE}': ${event_preview}"
 
     ensure_discovery_published "${CAMERA_ID}" "${CAMERA_NAME}"
-    publish_event_for_camera "${SAFE_ID}" "${event}"
-
-    if [ "${EVENT_TYPE}" = "motion" ] || [ "${EVENT_TYPE}" = "person" ] || [ "${EVENT_TYPE}" = "human" ] || [ "${EVENT_TYPE}" = "bird" ]; then
-      bashio::log.debug "Triggering motion pulse for ${SAFE_ID} because event type '${EVENT_TYPE}' requires it."
-      publish_motion_pulse "${SAFE_ID}"
+    if publish_event_for_camera "${SAFE_ID}" "${event}"; then
+      if [ "${EVENT_TYPE}" = "motion" ] || [ "${EVENT_TYPE}" = "person" ] || [ "${EVENT_TYPE}" = "human" ] || [ "${EVENT_TYPE}" = "bird" ]; then
+        bashio::log.debug "Triggering motion pulse for ${SAFE_ID} because event type '${EVENT_TYPE}' requires it."
+        publish_motion_pulse "${SAFE_ID}"
+      fi
     fi
   fi
 
