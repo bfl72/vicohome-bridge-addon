@@ -262,9 +262,10 @@ analyze_bird_video() {
       # POST to Roboflow Classify API
       bashio::log.debug "Sending frame to Roboflow..."
       local response
-      response=$(curl -s -X POST "https://classify.roboflow.com/${ROBOFLOW_MODEL_ID}?api_key=${ROBOFLOW_API_KEY}" \
+      # Use --data-binary @- to read from stdin and avoid "Argument list too long"
+      response=$(echo -n "$b64_image" | curl -s -X POST "https://classify.roboflow.com/${ROBOFLOW_MODEL_ID}?api_key=${ROBOFLOW_API_KEY}" \
         -H "Content-Type: application/x-www-form-urlencoded" \
-        -d "$b64_image")
+        --data-binary @-)
 
       bashio::log.debug "Roboflow response: ${response}"
 
