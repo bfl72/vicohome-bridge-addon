@@ -293,10 +293,10 @@ analyze_bird_video() {
           break
         fi
       else
-        bashio::log.debug "No predictions found in frame at ${ts}s."
+        bashio::log.info "No predictions found in frame at ${ts}s."
       fi
     else
-      bashio::log.debug "Failed to extract frame at ${ts}s (video might be too short or ended)."
+      bashio::log.error "Failed to extract frame at ${ts}s (video might be too short or ended)."
       # If we can't extract a frame, it might be the end of the video
       if [ $ts -gt 1 ]; then break; fi
     fi
@@ -328,7 +328,7 @@ publish_event_for_camera() {
 
   if [ -n "${trace_id}" ]; then
     if grep -q "${trace_id}" "${SEEN_IDS_FILE}" 2>/dev/null; then
-      bashio::log.info "Skipping already processed event ${trace_id}"
+      bashio::log.debug "Skipping already processed event ${trace_id}"
       return 1
     fi
     echo "${trace_id}" >> "${SEEN_IDS_FILE}"
@@ -598,7 +598,7 @@ while true; do
   # Quick sanity check so we don't feed clearly non-JSON into jq
   first_char=$(printf '%s' "${JSON_OUTPUT}" | sed -n '1s/^\(.\).*$/\1/p')
   if [ "${first_char}" != "[" ] && [ "${first_char}" != "{" ]; then
-    bashio::log.info "vico-cli output does not look like JSON (starts with '${first_char}'), skipping parse this cycle."
+    bashio::log.error "vico-cli output does not look like JSON (starts with '${first_char}'), skipping parse this cycle."
     sleep "${POLL_INTERVAL}"
     continue
   fi
