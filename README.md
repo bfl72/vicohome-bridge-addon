@@ -26,7 +26,7 @@ It:
 
 Tested on:
 
-- Home Assistant OS (aarch64 / Raspberry Pi)
+- Home Assistant OS (aarch64 / Raspberry Pi / amd64)
 
 ---
 
