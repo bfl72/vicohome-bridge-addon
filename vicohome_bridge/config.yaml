@@ -25,6 +25,8 @@ options:
   bootstrap_history: true
   region: "auto"
   api_base_override: ""
+  roboflow_api_key: ""
+  roboflow_model_id: ""
 
 schema:
   email: str
@@ -35,3 +37,6 @@ schema:
   bootstrap_history: bool?
   region: list(auto|us|eu)?
   api_base_override: str?
+  roboflow_api_key: str?
+  roboflow_model_id: str?
+

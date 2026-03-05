@@ -24,8 +24,8 @@ RUN CGO_ENABLED=0 GOOS=linux GOARCH=$(echo ${BUILD_ARCH} | sed 's/armv7/arm/g' |
 ARG BUILD_FROM
 FROM $BUILD_FROM
 
-# Install MQTT client and jq for JSON handling
-RUN apk add --no-cache mosquitto-clients jq
+# Install MQTT client and jq for JSON handling, ffmpeg for video=>image extraction, curl for roboflow API calls
+RUN apk add --no-cache mosquitto-clients jq ffmpeg curl
 
 # Run as root for simplicity
 USER root
