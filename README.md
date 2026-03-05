@@ -2,6 +2,10 @@
 
 Repo: <https://github.com/KIWIDUDE564/vicohome-bridge-addon>
 
+merged with lflondonol92 & xsorifc28 forks...
+
+into Repo: <https://github.com/bfl72/vicohome-bridge-addon>
+
 > ⚠️ **Unofficial integration.**  
 > This add-on is just a thin wrapper around the excellent open-source
 > [`vico-cli`](https://github.com/dydx/vico-cli) project by **dydx**.  
